@@ -923,8 +923,17 @@ http POST localhost:8081/reservations bookid="100-01" userid="LEJ"
 
 // 예약이 완료된 후 Status 확인(기존 : Successed(예약 성공), 배송서비스 추가 후 : deliverystarted)
 http GET localhost:8081/reservations
-```
+
 ![image](https://user-images.githubusercontent.com/63623995/81885106-92fed100-95d4-11ea-84c5-4bf802f17437.png)
+
+//배송사에서 배송 완료 처리
+http PATCH localhost:8084/deliveries/1 status="DeliveryCompleted"
+
+//예약에서 배송완료로 확인 됨
+http GET localhost:8081/reservations
+
+```
+![image](https://user-images.githubusercontent.com/63623995/81893756-3c4fc200-95e9-11ea-98b7-8364936b273e.png)
 
 
 ## 비동기식 호출 / 시간적 디커플링 / 장애격리 / 최종 (Eventual) 일관성 테스트
