@@ -796,7 +796,7 @@ public class Delivery {
 
     @PostPersist
     public void onPostPersist(){
-        System.out.println("==============onPostPersist ====== bookid : "+getBookid());
+        System.out.println("==============onPostPersist ====== orderid : "+getOrderid());
         Deliverystarted deliverystarted = new Deliverystarted();
         deliverystarted.setOrderid(this.getOrderid());
         deliverystarted.setUserid(this.getUserid());
@@ -911,4 +911,169 @@ public interface DeliveryRepository extends PagingAndSortingRepository<Delivery,
 }
 ```
 - 적용 후 REST API 의 테스트
+
+// 재고 서비스 입고
+http POST localhost:8082/stocks bookid="3" qty=3
+
+// 예약 서비스에서 입고된 책 예약
+http POST localhost:8081/reservations bookid="3" userid="test2"
+
+// 예약이 완료된 후 Status 확인
+   (기존 : Successed(예약 성공), 배송서비스 추가 후 : deliverystarted)
+http GET localhost:8081/reservations
+![image](https://user-images.githubusercontent.com/63623995/81885106-92fed100-95d4-11ea-84c5-4bf802f17437.png)
+
+
+## 비동기식 호출 / 시간적 디커플링 / 장애격리 / 최종 (Eventual) 일관성 테스트
+
+도서예약이 이루어진 후에 배송관리시스템으로 이를 알려주는 행위는 동기식이 아니라 비 동기식으로 처리하여 배송관리시스템의 처리를 위하여 도서예약이 블로킹 되지 않도록 처리한다.
+ 
+- 이를 위하여 도서예약에 성공하면 곧바로 예약 완료 도메인 이벤트를 카프카로 송출한다.
+
+```
+@PostUpdate
+    public void onPostUpdate(){
+        if("Canceled".equals(this.getStatus())){
+            Canceled canceled = new Canceled();
+            canceled.setBookid(this.getBookid());
+            ObjectMapper objectMapper = new ObjectMapper();
+            String json = null;
+
+            try {
+                json = objectMapper.writeValueAsString(canceled);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException("JSON format exception", e);
+            }
+
+            KafkaProcessor processor = Application.applicationContext.getBean(KafkaProcessor.class);
+            MessageChannel outputChannel = processor.outboundTopic();
+
+            outputChannel.send(MessageBuilder
+                    .withPayload(json)
+                    .setHeader(MessageHeaders.CONTENT_TYPE, MimeTypeUtils.APPLICATION_JSON)
+                    .build());
+        }else if(this.getStatus().equals("deliverystarted")){
+            // .. do nothing
+            System.out.println("deliverystarted!!!");
+        }else if(this.getStatus().equals("deliverycompleted")){
+            // .. do nothing
+            System.out.println("deliverycompleted!!!");
+        }else{
+            Reserved reserved = new Reserved();
+            reserved.setOrderId(this.getId());
+            reserved.setUserid(this.getUserid());
+            reserved.setBookid(this.getBookid());
+            reserved.setStatus(this.getStatus());
+            ObjectMapper objectMapper = new ObjectMapper();
+            String json = null;
+
+           try {
+                json = objectMapper.writeValueAsString(reserved);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException("JSON format exception", e);
+            }
+
+            KafkaProcessor processor = Application.applicationContext.getBean(KafkaProcessor.class);
+            MessageChannel outputChannel = processor.outboundTopic();
+
+            outputChannel.send(MessageBuilder
+                    .withPayload(json)
+                    .setHeader(MessageHeaders.CONTENT_TYPE, MimeTypeUtils.APPLICATION_JSON)
+                    .build());
+        }
+    }
+```
+- 배송관리 서비스에서는 예약성공 이벤트에 대해서 이를 수신하여 자신의 정책을 처리하도록 PolicyHandler 를 구현한다.
+
+```
+package bookrental;
+
+...
+
+@Service
+public class PolicyHandler{
+
+    @Autowired
+    DeliveryRepository deliveryRepository;
+    
+    @StreamListener(KafkaProcessor.INPUT)
+    public void wheneverReserved_Deliveryrequest(@Payload Reserved reserved){
+        if (reserved.isMe()) {
+            Delivery delivery = new Delivery();
+            delivery.setOrderid(reserved.getId());
+            delivery.setUserid(reserved.getUserid());
+            delivery.setBookid(reserved.getBookid());
+            deliveryRepository.save(delivery);
+        }
+    }
+
+}
+
+```
+
+- 배송 출발이 되면 곧바로 출발 도메인 이벤트를 카프카로 송출하여, 예약 서비스에서 Status를 변경 가능하게 해준다.
+
+```
+@PostPersist
+    public void onPostPersist(){
+        System.out.println("==============onPostPersist ====== bookid : "+getBookid());
+        Deliverystarted deliverystarted = new Deliverystarted();
+        deliverystarted.setOrderid(this.getOrderid());
+        deliverystarted.setUserid(this.getUserid());
+        deliverystarted.setBookid(this.getBookid());
+        deliverystarted.setStatus("DeliveryStarted");
+        ObjectMapper objectMapper = new ObjectMapper();
+        String json = null;
+
+        try {
+            json = objectMapper.writeValueAsString(deliverystarted);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("JSON format exception", e);
+        }
+
+
+        KafkaProcessor processor = Application.applicationContext.getBean(KafkaProcessor.class);
+        MessageChannel outputChannel = processor.outboundTopic();
+
+        outputChannel.send(MessageBuilder
+                .withPayload(json)
+                .setHeader(MessageHeaders.CONTENT_TYPE, MimeTypeUtils.APPLICATION_JSON)
+                .build());
+
+    }
+    
+```
+
+도서예약 시스템은 배송관리 시스템와 완전히 분리되어있으며, 배송관리 시스템이 유지보수로 인해 잠시 내려간 상태라도 예약을 받는데 문제가 없다:
+
+```
+# 배송관리 서비스 (customer) 를 잠시 내려놓음 (ctrl+c)
+
+// 재고 서비스 입고
+http POST localhost:8082/stocks bookid="100-02" qty=50
+
+// 예약 서비스에서 입고된 책 예약
+http POST localhost:8081/reservations bookid="100-02" userid="LEJ"
+
+# 예약 서비스 : 고객의 예약 상태가 배송 출발이 아니라, 예약 성공임을 확인
+3. http GET localhost:8081/reservations/*
+```
+![image](https://user-images.githubusercontent.com/63623995/81887154-79ac5380-95d9-11ea-9892-e0907e70f3ba.png)
+
+```
+# 배송관리 서비스 기동
+4. cd deliverymanagement
+mvn spring-boot:run
+
+# 예약 서비스 : 고객의 예약 상태가 배송 출발임을 확인
+
+```
+![image](https://user-images.githubusercontent.com/63623995/81887272-b2e4c380-95d9-11ea-80a6-067118738b7a.png)
+
+
+
+
+
+
+
 
