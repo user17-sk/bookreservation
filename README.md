@@ -707,27 +707,208 @@ spec:
 
 # 배송서비스 추가
 
+
 # 서비스 시나리오 추가
 
 기능적 요구사항
 1. 도서 예약이 완료되면 배송사(3PL)에 배송 출발이 요청된다.
 2. 배송사는 배송을 출발한다.
-3. 배송출발
-2. 재고 입고 시 입고 수량 만큼 재고가 증가한다.
-3. 고객이 도서 입고 리스트를 보고 도서 예약 신청을 한다.
-4. 도서 예약은 1권으로 제약한다.
-5. 도서 재고가 있으면 예약에 성공한다.
-6. 도서 재고가 없으면 예약에 실패한다.
-7. 예약 성공 시 재고는 1 차감된다.
-8. 고객이 도서 예약을 취소한다.
-9. 예약이 취소되면 재고가 1 증가한다.
-10. 예약이 성공, 취소하면 카톡 등으로 알람을 보낸다.
+3. 배송사는 배송 출발 정보를 도서 예약 시스템에 제공한다.
+4. 배송이 완료되면 배송사는 배송 완료 처리를 한다.
+5. 배송사는 배송 완료 정보를 도서 예약 시스템에 제공한다.
 
 비기능적 요구사항
 1. 트랜잭션
     1. 모든 트랜잭션은 비동기 식으로 구성한다.
 2. 장애격리
-    1. 재고 관리 기능이 수행되지 않더라도 도서 예약은 365일 24시간 받을 수 있어야 한다. Async (event-driven), Eventual Consistency
-3. 성능
-    1. 고객이 재고관리에서 확인할 수 있는 도서 재고를 예약(프론트엔드)에서 확인할 수 있어야 한다. CQRS
-    1. 예약이 완료되면 카톡 등으로 알림을 줄 수 있어야 한다. Event driven
+    1. 배송관리 기능이 수행되지 않더라도 도서 예약은 365일 24시간 받을 수 있어야 한다. Async (event-driven), Eventual Consistency
+
+## To-Be 조직 추가
+![image](https://user-images.githubusercontent.com/63623995/81883202-8cba2600-95cf-11ea-97ed-fd99da03cf11.png)
+
+
+## Event Storming 결과 완성된 모형
+![image](https://user-images.githubusercontent.com/63623995/81883794-1dddcc80-95d1-11ea-9f28-3da1c66ebd0b.png)
+
+### 완성본에 대한 기능적/비기능적 요구사항을 커버하는지 검증
+
+1. 도서 예약이 완료되면 배송사(3PL)에 배송 출발이 요청된다.(OK)
+2. 배송사는 배송 출발 정보를 도서 예약 시스템에 제공한다.(OK)
+3. 배송이 완료되면 배송사는 배송 완료 처리를 한다.(OK)
+4. 배송사는 배송 완료 정보를 도서 예약 시스템에 제공한다.(OK)
+--> 완성된 모델은 모든 기능 요구사항을 커버함.
+
+### 비기능 요구사항에 대한 검증
+
+ - 배송 시나리오에 대한 트랜잭션 처리
+  : 도서 예약과 배송간의 트랜잭션이 데이터 일관성의 시점이 크리티컬하지 않은 모든 경우라 판단, Eventual Consistency 를 기본으로 채택함.
+    
+
+## 헥사고날 아키텍처 다이어그램 도출
+![image](https://user-images.githubusercontent.com/63623995/81884159-110da880-95d2-11ea-85ad-32770840b899.png)
+
+    - Chris Richardson, MSA Patterns 참고하여 Inbound adaptor와 Outbound adaptor를 구분함
+    - 호출관계에서 PubSub 표현
+    - 서브 도메인과 바운디드 컨텍스트의 분리: 각 팀의 KPI 별로 아래와 같이 관심 구현 스토리지를 나눠가짐
+    - 다른 서비스들과 동일한 구조로 배송서비스 추가 됨
+
+
+# 구현
+분석/설계 단계에서 도출된 헥사고날 아키텍처에 따라, 배송서비스도 스프링부트로 구현하였다. 구현한 서비스를 로컬에서 실행하는 방법은 아래와 같다 (포트넘버는 8084이다)
+
+```
+cd deliverymanagement
+mvn spring-boot:run
+
+```
+
+## DDD 의 적용
+
+- 서비스내에 도출된 핵심 Aggregate Root 객체를 Entity 로 선언하였다. 
+
+```
+package bookrental;
+
+import javax.persistence.*;
+
+import bookrental.config.kafka.KafkaProcessor;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.BeanUtils;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.util.MimeTypeUtils;
+
+import java.util.List;
+
+@Entity
+@Table(name="Delivery_table")
+public class Delivery {
+
+    @Id
+    @GeneratedValue(strategy=GenerationType.AUTO)
+    private Long id;
+    private Long orderid;
+    private String userid;
+    private String bookid;
+    private String status;
+
+    @PostPersist
+    public void onPostPersist(){
+        System.out.println("==============onPostPersist ====== bookid : "+getBookid());
+        Deliverystarted deliverystarted = new Deliverystarted();
+        deliverystarted.setOrderid(this.getOrderid());
+        deliverystarted.setUserid(this.getUserid());
+        deliverystarted.setBookid(this.getBookid());
+        deliverystarted.setStatus("DeliveryStarted");
+        ObjectMapper objectMapper = new ObjectMapper();
+        String json = null;
+
+        try {
+            json = objectMapper.writeValueAsString(deliverystarted);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("JSON format exception", e);
+        }
+
+
+        KafkaProcessor processor = Application.applicationContext.getBean(KafkaProcessor.class);
+        MessageChannel outputChannel = processor.outboundTopic();
+
+        outputChannel.send(MessageBuilder
+                .withPayload(json)
+                .setHeader(MessageHeaders.CONTENT_TYPE, MimeTypeUtils.APPLICATION_JSON)
+                .build());
+
+
+        //BeanUtils.copyProperties(this, incomed);
+        //incomed.publishAfterCommit();
+
+    }
+
+    @PostUpdate
+    public void onPostUpdate(){
+        System.out.println("==============onPostPersist ====== bookid : "+getBookid());
+        Deliverycompleted deliverycompleted = new Deliverycompleted();
+        deliverycompleted.setOrderid(this.getOrderid());
+        deliverycompleted.setUserid(this.getUserid());
+        deliverycompleted.setBookid(this.getBookid());
+        deliverycompleted.setStatus(this.getStatus());
+        ObjectMapper objectMapper = new ObjectMapper();
+        String json = null;
+
+        try {
+            json = objectMapper.writeValueAsString(deliverycompleted);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("JSON format exception", e);
+        }
+
+
+        KafkaProcessor processor = Application.applicationContext.getBean(KafkaProcessor.class);
+        MessageChannel outputChannel = processor.outboundTopic();
+
+        outputChannel.send(MessageBuilder
+                .withPayload(json)
+                .setHeader(MessageHeaders.CONTENT_TYPE, MimeTypeUtils.APPLICATION_JSON)
+                .build());
+
+
+        //BeanUtils.copyProperties(this, incomed);
+        //incomed.publishAfterCommit();
+
+    }
+
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+    public Long getOrderid() {
+        return orderid;
+    }
+
+    public void setOrderid(Long orderid) { this.orderid = orderid; }
+    public String getUserid() {
+        return userid;
+    }
+
+    public void setUserid(String userid) {
+        this.userid = userid;
+    }
+    public String getBookid() {
+        return bookid;
+    }
+
+    public void setBookid(String bookid) {
+        this.bookid = bookid;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+
+
+
+}
+
+```
+- Entity Pattern 과 Repository Pattern 을 적용하여 JPA 를 통하여 다양한 데이터소스 유형 (RDB or NoSQL) 에 대한 별도의 처리가 없도록 데이터 접근 어댑터를 자동 생성하기 위하여 Spring Data REST 의 RestRepository 를 적용하였다
+```
+package bookrental;
+
+import org.springframework.data.repository.PagingAndSortingRepository;
+
+public interface DeliveryRepository extends PagingAndSortingRepository<Delivery, Long>{
+
+}
+```
+- 적용 후 REST API 의 테스트
+
