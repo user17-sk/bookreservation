@@ -911,16 +911,16 @@ public interface DeliveryRepository extends PagingAndSortingRepository<Delivery,
 }
 ```
 - 적용 후 REST API 의 테스트
-
+```
 // 재고 서비스 입고
-http POST localhost:8082/stocks bookid="3" qty=3
+http POST localhost:8082/stocks bookid="100-01" qty=50
 
 // 예약 서비스에서 입고된 책 예약
-http POST localhost:8081/reservations bookid="3" userid="test2"
+http POST localhost:8081/reservations bookid="100-01" userid="LEJ"
 
 // 예약이 완료된 후 Status 확인(기존 : Successed(예약 성공), 배송서비스 추가 후 : deliverystarted)
 http GET localhost:8081/reservations
-
+```
 ![image](https://user-images.githubusercontent.com/63623995/81885106-92fed100-95d4-11ea-84c5-4bf802f17437.png)
 
 
