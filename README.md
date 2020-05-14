@@ -923,9 +923,10 @@ http POST localhost:8081/reservations bookid="100-01" userid="LEJ"
 
 // 예약이 완료된 후 Status 확인(기존 : Successed(예약 성공), 배송서비스 추가 후 : deliverystarted)
 http GET localhost:8081/reservations
-
+```
 ![image](https://user-images.githubusercontent.com/63623995/81885106-92fed100-95d4-11ea-84c5-4bf802f17437.png)
 
+```
 //배송사에서 배송 완료 처리
 http PATCH localhost:8084/deliveries/1 status="DeliveryCompleted"
 
